@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>RNNoise Web Demo — Enhanced UI</title>
+<title>RNNoise Web — Single-file Demo (Working Start/Stop)</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -40,25 +40,25 @@
   .mute-warning { color:#ffb4b4; font-weight:600; margin-top:8px;}
   .controls .spacer {flex:1}
   .link{color:var(--accent); text-decoration:none;}
+  .small { font-size:0.85rem; color:var(--muted); }
 </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <div>
-        <h1>RNNoise Web Demo — Enhanced UI</h1>
-        <p class="lead">WebAssembly RNNoise + polished UI. Uses RNNoise WASM to denoise microphone input in real-time (demo). Use headphones.</p>
+        <h1>RNNoise Web — Working Demo</h1>
+        <p class="lead">Single-file HTML demo. RNNoise WASM loaded from jsDelivr. Start → allow mic → denoising runs. Use headphones.</p>
       </div>
       <div style="margin-left:auto;text-align:right">
-        <div class="meta">Frame size: <strong>480 samples</strong> · Source: <a class="link" href="https://github.com/xiph/rnnoise" target="_blank">xiph/rnnoise</a></div>
-        <div class="meta">WASM build: <a class="link" href="https://github.com/shiguredo/rnnoise-wasm" target="_blank">@shiguredo/rnnoise-wasm</a></div>
+        <div class="meta small">Frame size: <strong>480 samples</strong></div>
       </div>
     </header>
 
     <div class="controls">
       <button id="startBtn" class="btn primary">Start</button>
       <button id="stopBtn" class="btn" disabled>Stop</button>
-      <button id="toggleDenoiseBtn" class="btn ghost" disabled>Enable Denoise</button>
+      <button id="toggleBtn" class="btn ghost" disabled>Disable Denoise</button>
 
       <div class="spacer"></div>
 
@@ -71,7 +71,7 @@
         <div class="card">
           <h3 style="margin:0 0 8px 0">Waveform (input)</h3>
           <canvas id="wave"></canvas>
-          <div class="meta" id="statusText">status: <span class="status">idle</span></div>
+          <div class="meta">status: <span id="status" class="status">idle</span></div>
         </div>
 
         <div class="card" style="margin-top:12px">
@@ -83,276 +83,301 @@
 
       <div>
         <div class="card">
-          <h3 style="margin:0 0 8px 0">Controls & Info</h3>
-          <div class="meta">RNNoise WASM loaded: <span id="wasmLoaded">no</span></div>
-          <div class="meta">Denoiser state: <span id="denoiseState">none</span></div>
-          <div class="meta" style="margin-top:8px">Latency: <span id="latency">—</span></div>
-          <div class="mute-warning" id="warn">Start the demo and use headphones. Keep volume low initially.</div>
+          <h3 style="margin:0 0 8px 0">Info</h3>
+          <div class="meta">WASM module: <span id="wasm">not loaded</span></div>
+          <div class="meta">Denoiser: <span id="denstate">none</span></div>
+          <div class="meta">Latency: <span id="lat">—</span></div>
         </div>
 
         <div class="card" style="margin-top:12px">
-          <h3 style="margin:0 0 8px 0">About / Notes</h3>
-          <div class="meta">This demo demonstrates RNNoise running in the browser (WASM). For production-grade low-latency integrate RNNoise inside an AudioWorklet with a synchronous WASM build (see shiguredo/jitsi notes).</div>
-          <div class="meta" style="margin-top:8px"><a class="link" href="https://github.com/shiguredo/rnnoise-wasm" target="_blank">@shiguredo/rnnoise-wasm</a> · <a class="link" href="https://github.com/xiph/rnnoise" target="_blank">xiph/rnnoise</a></div>
+          <h3 style="margin:0 0 8px 0">Notes</h3>
+          <div class="meta small">This single HTML imports the RNNoise WASM package from jsDelivr (@shiguredo/rnnoise-wasm). For best latency use AudioWorklet + sync WASM.</div>
         </div>
       </div>
     </div>
 
-    <footer>Serve over <strong>HTTPS</strong> (GitHub Pages). Denoise switch toggles RNNoise processing; Stop now reliably disconnects audio.</footer>
+    <footer>Serve via HTTPS. If denoiser fails to load, the UI will still show waveform.</footer>
   </div>
 
 <script type="module">
 /*
-  RNNoise Web demo (script-processor circular-buffer approach).
-  - Requires: RNNoise WASM module (shiguredo / jitsi builds)
-  - Behavior: captures mic -> buffers -> when 480 samples available -> calls rnnoise.processFrame -> outputs denoised audio
-  - Note: ScriptProcessor is used here for simplicity and compatibility; for best latency use AudioWorklet + sync-WASM (see README of rnnoise-wasm).
+ Single-file RNNoise demo.
+ - Dynamically imports RNNoise WASM package from jsDelivr.
+ - Uses circular buffer + processing loop to produce denoised frames.
+ - Keeps a processed-output queue so ScriptProcessor can always fill output (fixes previous zero-output problem).
+ - Start/Stop fully clean up nodes and free RNNoise state.
 */
 
-/* ---------------------------
-   CONFIG: CDN path to rnnoise-wasm
-   (replace version if you want a different one)
-   --------------------------- */
-const RNNOISE_CDN = 'https://cdn.jsdelivr.net/npm/@shiguredo/rnnoise-wasm@2025.1.5/dist/index.js';
+/* CDN path for @shiguredo/rnnoise-wasm (jsDelivr). If this breaks later, update version on this URL. */
+const RNNOISE_MODULE = 'https://cdn.jsdelivr.net/npm/@shiguredo/rnnoise-wasm@2025.1.5/dist/index.js';
 
+const FRAME_SIZE = 480;           // RNNoise frame size
+const QUEUE_MAX_FRAMES = 64;     // processed frames queue capacity
+
+// UI elements
 const startBtn = document.getElementById('startBtn');
 const stopBtn  = document.getElementById('stopBtn');
-const toggleDenoiseBtn = document.getElementById('toggleDenoiseBtn');
-const gainEl = document.getElementById('gain');
-const mixEl  = document.getElementById('mix');
-const statusText = document.getElementById('statusText');
-const wasmLoadedEl = document.getElementById('wasmLoaded');
-const denoiseStateEl = document.getElementById('denoiseState');
+const toggleBtn= document.getElementById('toggleBtn');
+const gainEl   = document.getElementById('gain');
+const mixEl    = document.getElementById('mix');
+const statusEl = document.getElementById('status');
+const wasmEl   = document.getElementById('wasm');
+const denstateEl = document.getElementById('denstate');
+const latEl = document.getElementById('lat');
 const peaksEl = document.getElementById('peaks');
-const latencyEl = document.getElementById('latency');
 
-const waveCanvas = document.getElementById('wave'), waveCtx = waveCanvas.getContext('2d');
-const specCanvas = document.getElementById('spectrum'), specCtx = specCanvas.getContext('2d');
+const waveCanvas = document.getElementById('wave');
+const specCanvas = document.getElementById('spectrum');
+const wctx = waveCanvas.getContext('2d');
+const sctx = specCanvas.getContext('2d');
 
-let audioCtx = null, micStream = null, sourceNode = null;
+let audioCtx = null, micStream = null, srcNode = null;
 let scriptNode = null, gainNode = null, analyser = null, freqAnalyser = null;
-let rn = null, denoiser = null;
-let denoiseEnabled = false;
 
-// Circular buffer for RNNoise frames
-const FRAME_SIZE = 480; // RNNoise expects 480-sample frames
-let circBuf = null, circWrite = 0, circRead = 0, circLen = 0;
+let rn = null, denoiser = null, denoiseEnabled = true;
 
-// Visualizer utilities (resize for DPR)
-function resizeCanvasToDisplaySize(canvas){
-  const rect = canvas.getBoundingClientRect();
+// circular input buffer (Float32), pointers
+let circBuf = null, circWrite = 0, circLen = 0, circCap = 0;
+
+// processed frames queue (Array of Float32Array), read/write pointers
+let processedQueue = [], processedRead = 0;
+
+// small helper: resize canvases for DPR
+function resizeCanvas(c){
+  const rect = c.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(rect.width * dpr);
-  canvas.height = Math.round(rect.height * dpr);
-  return {w:canvas.width, h:canvas.height, dpr};
+  c.width = Math.round(rect.width * dpr);
+  c.height= Math.round(rect.height * dpr);
+  return {w:c.width,h:c.height,dpr};
 }
 
+// draw visualizers
 function draw(){
-  if(!analyser || !audioCtx) { requestAnimationFrame(draw); return; }
   requestAnimationFrame(draw);
+  if(!analyser) return;
 
   // waveform
-  const timeData = new Uint8Array(analyser.fftSize);
-  analyser.getByteTimeDomainData(timeData);
-  const {w:ww, h:wh} = resizeCanvasToDisplaySize(waveCanvas);
-  waveCtx.fillStyle = '#000'; waveCtx.fillRect(0,0,ww,wh);
-  waveCtx.lineWidth = 2 * (window.devicePixelRatio||1);
-  waveCtx.strokeStyle = '#4ee7c6'; waveCtx.beginPath();
-  for(let i=0;i<timeData.length;i++){
-    const x = (i / timeData.length) * ww;
-    const y = (timeData[i]/255) * wh;
-    if(i===0) waveCtx.moveTo(x,y); else waveCtx.lineTo(x,y);
+  const buf = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buf);
+  const {w:ww,h:wh} = resizeCanvas(waveCanvas);
+  wctx.fillStyle = '#000'; wctx.fillRect(0,0,ww,wh);
+  wctx.lineWidth = 2 * (window.devicePixelRatio||1);
+  wctx.strokeStyle = '#4ee7c6'; wctx.beginPath();
+  for(let i=0;i<buf.length;i++){
+    const x = (i / buf.length) * ww;
+    const y = (buf[i]/255) * wh;
+    if(i===0) wctx.moveTo(x,y); else wctx.lineTo(x,y);
   }
-  waveCtx.stroke();
+  wctx.stroke();
 
   // spectrum
-  const specData = new Uint8Array(freqAnalyser.frequencyBinCount);
-  freqAnalyser.getByteFrequencyData(specData);
-  const {w:fw, h:fh} = resizeCanvasToDisplaySize(specCanvas);
-  specCtx.clearRect(0,0,fw,fh);
-  const barW = fw / specData.length;
-  // detect top peaks (for simple display)
-  let top = [];
-  for(let i=0;i<specData.length;i++){
-    if(specData[i] > 200) top.push({i, v:specData[i]});
+  const fbuf = new Uint8Array(freqAnalyser.frequencyBinCount);
+  freqAnalyser.getByteFrequencyData(fbuf);
+  const {w:fw,h:fh} = resizeCanvas(specCanvas);
+  sctx.fillStyle = '#000'; sctx.fillRect(0,0,fw,fh);
+  const barW = fw / fbuf.length;
+  // show top peaks
+  const peaks = [];
+  for(let i=0;i<fbuf.length;i++){
+    if(fbuf[i] > 220) peaks.push(i);
   }
-  peaksEl.textContent = top.length ? top.slice(0,6).map(p=>Math.round((p.i * audioCtx.sampleRate) / (specData.length*2))+'Hz').join(', ') : '—';
-  for(let i=0;i<specData.length;i++){
-    const v = specData[i]/255;
-    specCtx.fillStyle = `hsl(${Math.round((i/specData.length)*280)},80%,60%)`;
-    specCtx.fillRect(i*barW, fh - v*fh, barW*0.9, v*fh);
+  peaksEl.textContent = peaks.length ? peaks.slice(0,6).map(i => Math.round((i * (audioCtx.sampleRate || 48000)) / (fbuf.length*2)) + 'Hz').join(', ') : '—';
+  for(let i=0;i<fbuf.length;i++){
+    const v = fbuf[i] / 255;
+    sctx.fillStyle = `hsl(${Math.round((i/fbuf.length)*280)},80%,60%)`;
+    sctx.fillRect(i*barW, fh - v*fh, barW*0.9, v*fh);
   }
 }
 
-// Load RNNoise WASM module from CDN (dynamic import ESM)
+// load RNNoise module from CDN (dynamic ESM import)
 async function loadRnnoise(){
+  if(rn) return rn;
   try{
-    // dynamic import; package exposes Rnnoise
-    const mod = await import(RNNOISE_CDN);
-    // some packages export Rnnoise named export, some default; check both
+    const mod = await import(RNNOISE_MODULE);
+    // package exports Rnnoise in different shapes; check
     const Rnnoise = mod?.Rnnoise ?? mod?.default?.Rnnoise ?? mod?.default;
-    if(!Rnnoise) throw new Error('RNNoise module not found in CDN bundle');
-    const loaded = await Rnnoise.load(); // returns API object
-    return loaded;
-  }catch(err){
-    console.error('Failed to load RNNoise WASM from CDN', err);
-    throw err;
+    if(!Rnnoise) throw new Error('RNNoise export not found in module');
+    const api = await Rnnoise.load(); // loads WASM and returns API object
+    rn = api;
+    wasmEl.textContent = 'loaded';
+    return rn;
+  }catch(e){
+    console.error('Failed to load RNNoise WASM:', e);
+    wasmEl.textContent = 'load failed';
+    throw e;
   }
 }
 
-// Start: capture mic and start processing
+// start audio pipeline
 async function start(){
   if(audioCtx) return;
-  statusText.querySelector('.status').textContent = 'starting...';
+  statusEl.textContent = 'starting';
   try{
     micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
   }catch(e){
-    statusText.querySelector('.status').textContent = 'mic permission denied';
+    statusEl.textContent = 'mic denied';
     console.error(e); return;
   }
 
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint:'interactive' });
-  sourceNode = audioCtx.createMediaStreamSource(micStream);
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+  srcNode = audioCtx.createMediaStreamSource(micStream);
 
-  // analyzers for visuals
+  // analysers for visuals
   analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
   freqAnalyser = audioCtx.createAnalyser(); freqAnalyser.fftSize = 4096;
-  sourceNode.connect(analyser); sourceNode.connect(freqAnalyser);
+  srcNode.connect(analyser);
+  srcNode.connect(freqAnalyser);
 
-  // script processor for processing & output (use small buffer for lower latency)
-  const bufferSize = 128; // keep low; RNNoise frames are buffered separately
+  // circular buffer to hold incoming float samples; capacity = FRAME_SIZE * 16
+  circCap = FRAME_SIZE * 16;
+  circBuf = new Float32Array(circCap);
+  circWrite = 0; circLen = 0;
+
+  // processed queue reset
+  processedQueue = []; processedRead = 0;
+
+  // create script processor (small buffer for lower latency)
+  const bufferSize = 128; // keep small but compatible
   scriptNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
 
-  // circular buffer sized to hold multiple frames (e.g., 8*FRAME_SIZE)
-  const cbCapacity = FRAME_SIZE * 8;
-  circBuf = new Float32Array(cbCapacity);
-  circWrite = 0; circRead = 0; circLen = 0;
-
-  // lazy load rnnoise WASM
-  if(!rn){
-    try{
-      rn = await loadRnnoise();
-      wasmLoadedEl.textContent = 'yes';
-    }catch(e){
-      wasmLoadedEl.textContent = 'failed';
-      console.error(e);
-      // allow continued operation without rnnoise (so user can test waveform)
+  // ensure rnnoise loaded and create denoiser
+  try{
+    await loadRnnoise();
+    if(rn && !denoiser){
+      denoiser = rn.createDenoiseState();
+      denstateEl.textContent = 'created';
+      toggleBtn.disabled = false;
+      denoiseEnabled = true;
+      toggleBtn.textContent = 'Disable Denoise';
     }
+  }catch(e){
+    // allow running without denoiser (visuals)
+    console.warn('Continuing without RNNoise denoiser');
   }
 
-  // create denoiser state if we have rn
-  if(rn && !denoiser){
-    denoiser = rn.createDenoiseState();
-    denoiseStateEl.textContent = 'created';
-    toggleDenoiseBtn.disabled = false;
-    // default enabled
-    denoiseEnabled = true;
-    toggleDenoiseBtn.textContent = 'Disable Denoise';
-  }
+  // gain node and connect chain: src -> scriptNode -> gain -> dest
+  gainNode = audioCtx.createGain(); gainNode.gain.value = parseFloat(gainEl.value);
+  srcNode.connect(scriptNode);
+  scriptNode.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
 
-  // gain node
-  gainNode = audioCtx.createGain();
-  gainNode.gain.value = parseFloat(gainEl.value);
-
-  // processing function: feed samples to circ buffer; when we have full frames, call processFrame
+  // audio processing: write incoming input to circular buffer, process frames as they become available,
+  // enqueue processed frames into processedQueue. ScriptProcessor's onaudioprocess will also output processed frames when available.
   scriptNode.onaudioprocess = function(evt){
     const input = evt.inputBuffer.getChannelData(0);
     const output = evt.outputBuffer.getChannelData(0);
 
-    // write input to circular buffer
+    // write into circular buffer
     for(let i=0;i<input.length;i++){
       circBuf[circWrite] = input[i];
-      circWrite = (circWrite + 1) % circBuf.length;
-      if(circLen < circBuf.length) circLen++; else circRead = (circRead + 1) % circBuf.length; // overwrite older if full
+      circWrite = (circWrite + 1) % circCap;
+      if(circLen < circCap) circLen++; else { /*overflow, advance read*/ }
     }
 
-    // Prepare an output buffer to fill (we produce processed samples if available; else passthrough)
+    // If we have enough samples to form a FRAME_SIZE, process as many frames as possible (but limit to queue capacity)
+    while(denoiseEnabled && denoiser && circLen >= FRAME_SIZE && processedQueue.length < QUEUE_MAX_FRAMES){
+      const frame = new Float32Array(FRAME_SIZE);
+      // copy FRAME_SIZE starting from (circWrite - circLen) position (i.e. oldest data). Compute read index:
+      // We'll maintain a read pointer implicitly: compute readPos = (circWrite - circLen + circCap) % circCap
+      let readPos = (circWrite - circLen + circCap) % circCap;
+      for(let k=0;k<FRAME_SIZE;k++){
+        frame[k] = circBuf[(readPos + k) % circCap];
+      }
+      // call rnnoise (mutates frame)
+      try{
+        denoiser.processFrame(frame);
+      }catch(e){
+        console.warn('rnnoise processFrame error', e);
+      }
+      // advance the circular buffer's consumed samples
+      circLen -= FRAME_SIZE;
+      // enqueue processed frame
+      processedQueue.push(frame);
+      // keep processedQueue bounded
+      if(processedQueue.length > QUEUE_MAX_FRAMES) processedQueue.shift();
+    }
+
+    // Fill output from processedQueue if available (copy from head frame)
     let outIdx = 0;
     while(outIdx < output.length){
-      // If we have at least FRAME_SIZE samples available, process next chunk(s)
-      if(denoiseEnabled && denoiser && circLen >= FRAME_SIZE){
-        // build a contiguous Float32Array of FRAME_SIZE (handle wrap)
-        const frame = new Float32Array(FRAME_SIZE);
-        // copy from circRead
-        for(let k=0;k<FRAME_SIZE;k++){
-          frame[k] = circBuf[(circRead + k) % circBuf.length];
+      if(processedQueue.length > 0){
+        const head = processedQueue[0];
+        if(!head._pos) head._pos = 0;
+        // copy as many samples as possible from head into output
+        while(outIdx < output.length && head._pos < head.length){
+          const processedSample = head[head._pos++];
+          // apply gain and mix: mix slider blends processed with silence (we could keep raw passthrough but to avoid echo/feedback, we keep processed only)
+          const mix = parseFloat(mixEl.value);
+          const processedWithGain = processedSample * parseFloat(gainEl.value);
+          // if mix>0 we would need original input samples — for safety and to avoid feedback we use processed only and allow user to lower mix to 0
+          output[outIdx++] = processedWithGain * (1 - mix) + 0 * mix;
         }
-        // process in place (rnnoise API mutates the frame)
-        try{
-          denoiser.processFrame(frame);
-        }catch(e){
-          console.warn('rnnoise processFrame error', e);
-        }
-        // advance read index by FRAME_SIZE
-        circRead = (circRead + FRAME_SIZE) % circBuf.length;
-        circLen -= FRAME_SIZE;
-
-        // now write results to output (mix according to mix slider)
-        const mix = parseFloat(mixEl.value);
-        for(let j=0;j<FRAME_SIZE && outIdx < output.length; j++){
-          // when mixing with original input we need original sample; we don't have it now; use processed sample directly
-          output[outIdx++] = frame[j] * (1 - mix) + 0 * mix; // passthrough portion is 0 here (we could keep separate raw buffer if needed)
-        }
+        // if head consumed completely, shift it out
+        if(head._pos >= head.length) processedQueue.shift();
       } else {
-        // not enough processed samples: fall back to pass-through latest input samples (best-effort)
-        // read from a local pointer (we'll output zeros to avoid feedback; safer for headphones)
-        const fallback = 0.0;
-        output[outIdx++] = fallback;
+        // no processed data ready — output silence to avoid feedback
+        output[outIdx++] = 0;
       }
     }
   };
 
-  // connect graph: source -> scriptNode -> gain -> dest
-  sourceNode.connect(scriptNode);
-  scriptNode.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
-
   // UI updates
   startBtn.disabled = true; stopBtn.disabled = false;
-  statusText.querySelector('.status').textContent = 'running';
-  latencyEl.textContent = ((audioCtx.baseLatency || 0) * 1000).toFixed(1) + ' ms';
-  requestAnimationFrame(draw);
+  statusEl.textContent = 'running';
+  latEl.textContent = ((audioCtx.baseLatency || 0) * 1000).toFixed(1) + ' ms';
+  draw();
 }
 
-// Stop and cleanup (fixed: fully removes nodes, stops tracks, frees denoiser)
+// stop and cleanup
 function stop(){
-  if(!audioCtx) return;
-  // disconnect nodes first
-  try{ if(sourceNode) sourceNode.disconnect(); }catch(e){}
-  try{ if(scriptNode) scriptNode.disconnect(); }catch(e){}
+  // disconnect nodes and stop mic tracks
+  try{ if(srcNode) srcNode.disconnect(); }catch(e){}
+  try{ if(scriptNode) scriptNode.disconnect(); scriptNode.onaudioprocess = null; }catch(e){}
   try{ if(gainNode) gainNode.disconnect(); }catch(e){}
-  // stop mic tracks
   try{ if(micStream) micStream.getTracks().forEach(t=>t.stop()); }catch(e){}
-  // destroy denoiser state to free WASM memory if present
-  try{ if(denoiser){ denoiser.destroy(); denoiser = null; denoiseStateEl.textContent = 'destroyed'; } }catch(e){ console.warn(e); }
+  // destroy denoiser state if created
+  try{ if(denoiser){ denoiser.destroy(); denoiser = null; denstateEl.textContent = 'destroyed'; } }catch(e){ console.warn(e); }
   // close audio context
-  try{ audioCtx.close(); }catch(e){}
-  // reset local refs
-  audioCtx = null; micStream = null; sourceNode = null; scriptNode = null; gainNode = null; analyser = null; freqAnalyser = null;
-  circBuf = null; circLen = circRead = circWrite = 0;
-  startBtn.disabled = false; stopBtn.disabled = true; toggleDenoiseBtn.disabled = true;
-  statusText.querySelector('.status').textContent = 'stopped';
-  latencyEl.textContent = '—';
+  try{ if(audioCtx) audioCtx.close(); }catch(e){}
+  // reset variables
+  audioCtx = null; micStream = null; srcNode = null; scriptNode = null; gainNode = null; analyser = null; freqAnalyser = null;
+  circBuf = null; circCap = 0; circLen = 0; circWrite = 0;
+  processedQueue = []; processedRead = 0;
+  startBtn.disabled = false; stopBtn.disabled = true; toggleBtn.disabled = true;
+  statusEl.textContent = 'stopped';
+  latEl.textContent = '—';
 }
 
-// Toggle denoise on/off (keeps denoiser instance)
+// toggle denoise on/off
 function toggleDenoise(){
   denoiseEnabled = !denoiseEnabled;
-  toggleDenoiseBtn.textContent = denoiseEnabled ? 'Disable Denoise' : 'Enable Denoise';
-  statusText.querySelector('.status').textContent = denoiseEnabled ? 'denoising' : 'passthrough';
+  toggleBtn.textContent = denoiseEnabled ? 'Disable Denoise' : 'Enable Denoise';
+  statusEl.textContent = denoiseEnabled ? 'denoising' : 'passthrough';
 }
 
-// UI wiring
-startBtn.addEventListener('click', start);
+startBtn.addEventListener('click', async ()=>{
+  try{
+    await start();
+    toggleBtn.disabled = false;
+    toggleBtn.textContent = denoiseEnabled ? 'Disable Denoise' : 'Enable Denoise';
+  }catch(e){
+    console.error('Start failed', e);
+    statusEl.textContent = 'start failed';
+    startBtn.disabled = false;
+  }
+});
 stopBtn.addEventListener('click', stop);
-toggleDenoiseBtn.addEventListener('click', toggleDenoise);
-gainEl.addEventListener('input', ()=> { if(gainNode) gainNode.gain.value = parseFloat(gainEl.value); });
-mixEl.addEventListener('input', ()=> { /* mix used in processing */ });
+toggleBtn.addEventListener('click', toggleDenoise);
 
-// initial canvas sizing
-function initialResize(){ resizeCanvasToDisplaySize(waveCanvas); resizeCanvasToDisplaySize(specCanvas); }
-window.addEventListener('resize', initialResize); initialResize();
+// gain and mix control
+gainEl.addEventListener('input', ()=>{ if(gainNode) gainNode.gain.value = parseFloat(gainEl.value); });
+mixEl.addEventListener('input', ()=>{/*mix used in processing*/});
+
+// initial resize
+function initialResize(){ resizeCanvas(waveCanvas); resizeCanvas(specCanvas); }
+window.addEventListener('resize', initialResize);
+initialResize();
 
 </script>
 </body>
-          </html>
+</html>
