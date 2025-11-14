@@ -1,263 +1,409 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>Anti-Noise Demo (ANC Web)</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Anti-Noise — Calibrate & Adaptive Notch</title>
 
 <style>
-  body {
-    margin:0;
-    padding:20px;
-    font-family: system-ui;
-    background:#0d0d0d;
-    color:white;
+  :root{
+    --bg:#0b0f14; --card:#0f1720; --muted:#9aa6b2; --accent:#4bd3ff;
+    --glass-bg: rgba(255,255,255,0.03);
   }
-  h1 { font-size:1.8rem; margin-bottom:10px; }
-  p { opacity:0.8; }
+  html,body{height:100%; margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Arial; background:
+    radial-gradient(1200px 600px at 10% 10%, rgba(75,211,255,0.03), transparent 10%),
+    linear-gradient(180deg,#081018 0%, #061018 100%);
+    color:#e6eef6;}
+  .wrap { max-width:1100px; margin:28px auto; padding:24px; }
+  header { display:flex; gap:16px; align-items:center; }
+  h1{font-size:1.4rem; margin:0; font-weight:600}
+  p.lead { margin:0; color:var(--muted); font-size:0.95rem; }
 
-  .controls {
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    margin:20px 0;
-  }
-  button {
-    background:#1f1f1f;
-    border:1px solid #444;
-    padding:10px 18px;
-    border-radius:8px;
-    font-size:1rem;
-    cursor:pointer;
-    color:white;
-  }
-  button.primary { background:#008cff; border-color:#008cff; }
-  button:disabled { opacity:0.4; }
+  /* Controls row */
+  .controls { display:flex; gap:12px; align-items:center; margin-top:18px; flex-wrap:wrap; }
+  .btn { background:linear-gradient(180deg,#11202a,#0b1418); border:1px solid rgba(255,255,255,0.04);
+        padding:10px 14px; color:#dff7ff; border-radius:10px; cursor:pointer; box-shadow:0 6px 18px rgba(0,0,0,0.6);}
+  .btn.primary { background:linear-gradient(180deg,#06b6ff,#0284c7); color:#012; font-weight:700; }
+  .btn.ghost { background:transparent; border:1px dashed rgba(255,255,255,0.04); color:var(--muted); }
+  .btn:disabled{opacity:0.45; cursor:not-allowed; transform:none;}
 
-  .panel {
-    background:#151515;
-    padding:15px;
-    border-radius:10px;
-    margin-top:20px;
+  /* Card */
+  .card { margin-top:20px; background:var(--glass-bg); border-radius:14px; padding:14px; 
+         backdrop-filter: blur(8px) saturate(130%); border:1px solid rgba(255,255,255,0.035);
+         box-shadow: 0 8px 30px rgba(5,8,12,0.6); transition:transform .28s ease, box-shadow .28s ease;}
+  .card:hover{ transform:translateY(-6px); box-shadow: 0 18px 48px rgba(5,8,12,0.7); }
+
+  .grid { display:grid; grid-template-columns: 1fr 360px; gap:16px; margin-top:12px; align-items:start; }
+  @media (max-width:880px){ .grid{ grid-template-columns: 1fr; } }
+
+  /* Canvas */
+  canvas{ width:100%; height:160px; border-radius:8px; background:#000; display:block; }
+
+  .sliders { display:flex; gap:12px; align-items:center; margin-left:auto;}
+  label.small{ font-size:0.85rem; color:var(--muted); display:flex; gap:8px; align-items:center; }
+  input[type=range] { accent-color:var(--accent); }
+
+  .meta { color:var(--muted); font-size:0.9rem; margin-top:8px; }
+  .small-muted{ font-size:0.82rem; color:var(--muted); margin-top:6px; }
+
+  /* animated glow */
+  .glow { position:relative; overflow:hidden; border-radius:12px; }
+  .glow::after {
+    content:""; position:absolute; inset:-40%; background:linear-gradient(90deg, transparent, rgba(75,211,255,0.06), transparent);
+    transform:rotate(12deg);
+    animation: slide 5s linear infinite;
   }
-  canvas { width:100%; height:120px; background:#000; border-radius:6px; }
+  @keyframes slide { from{transform:translateX(-120%)} to{transform:translateX(120%)} }
+
+  .tag { display:inline-block; background:rgba(255,255,255,0.03); padding:6px 8px; border-radius:8px; color:var(--muted); font-size:0.8rem; }
+
+  footer { margin-top:18px; color:var(--muted); font-size:0.85rem; }
 </style>
 </head>
 <body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Anti-Noise — Calibrate & Adaptive Notch</h1>
+        <p class="lead">Improves steady tonal noise (fan/hum) by creating automatic notch filters + time-domain inversion. Use headphones.</p>
+      </div>
+      <div style="margin-left:auto; text-align:right">
+        <div class="tag">Enhanced ANC</div>
+        <div class="small-muted">Tip: click <strong>Calibrate</strong> for 3s while only noise is present (no talking).</div>
+      </div>
+    </header>
 
-<h1>Web Anti-Noise (ANC)</h1>
-<p>Noise cancellation + waveform + spectrum visualizer. Use headphones.</p>
+    <div class="controls">
+      <button id="startBtn" class="btn primary">Start</button>
+      <button id="stopBtn" class="btn" disabled>Stop</button>
 
-<!-- Controls -->
-<div class="controls">
-  <button id="startBtn" class="primary">Start</button>
-  <button id="stopBtn" disabled>Stop</button>
+      <button id="calBtn" class="btn ghost">Calibrate (3s)</button>
 
-  <label>
-    Gain:
-    <input id="gainSlider" type="range" min="0" max="2" step="0.01" value="1">
-  </label>
+      <div class="sliders">
+        <label class="small">Gain <input id="gain" type="range" min="0" max="2" step="0.01" value="1"></label>
+        <label class="small">Mix <input id="mix" type="range" min="0" max="1" step="0.01" value="0"></label>
+      </div>
+    </div>
 
-  <label>
-    Mix:
-    <input id="mixSlider" type="range" min="0" max="1" step="0.01" value="0">
-  </label>
-</div>
+    <div class="grid">
+      <!-- Left: visualizers -->
+      <div>
+        <div class="card glow">
+          <h3 style="margin:0 0 8px 0">Waveform</h3>
+          <canvas id="wave"></canvas>
+        </div>
 
-<!-- Waveform Visualizer -->
-<div class="panel">
-  <h3>Waveform</h3>
-  <canvas id="waveCanvas"></canvas>
-</div>
+        <div class="card" style="margin-top:12px">
+          <h3 style="margin:0 0 8px 0">Spectrum (click Calibrate to analyze)</h3>
+          <canvas id="spectrum"></canvas>
+          <div class="meta" id="peaks">Peaks: —</div>
+        </div>
+      </div>
 
-<!-- Spectrum Visualizer -->
-<div class="panel">
-  <h3>Spectrum</h3>
-  <canvas id="freqCanvas"></canvas>
-</div>
+      <!-- Right: status & controls -->
+      <div>
+        <div class="card">
+          <h3 style="margin:0 0 6px 0">Status</h3>
+          <div class="meta" id="status">idle</div>
+          <div class="small-muted" style="margin-top:10px">
+            Notch filters created: <span id="notchCount">0</span><br>
+            Worklet: <span id="worklet">checking...</span>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <h3 style="margin:0 0 6px 0">About / Credits</h3>
+          <div class="small-muted">
+            Notch auto-calibration + AudioWorklet inverter. UI inspired by glassmorphism CodePen demos.
+            <div style="margin-top:8px"><a href="https://codepen.io/kevinpowell/pen/XJJwaxG" target="_blank" style="color:var(--accent)">Glass card example</a> ·
+            <a href="https://codepen.io/kersley/pen/KKmeQeq" target="_blank" style="color:var(--accent)">Frosted animated card</a></div>
+            (Examples: CodePen). 1
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <div class="small-muted">Run on a secure origin (https), use headphones, and start with low volume.</div>
+    </footer>
+  </div>
 
 <script>
-let audioContext, micStream, sourceNode;
-let inverterNode, gainNode;
-let analyser, freqAnalyser;
-let running=false;
-
-const startBtn=document.getElementById("startBtn");
-const stopBtn=document.getElementById("stopBtn");
-const gainSlider=document.getElementById("gainSlider");
-const mixSlider=document.getElementById("mixSlider");
-
-const waveCanvas=document.getElementById("waveCanvas");
-const freqCanvas=document.getElementById("freqCanvas");
-const wctx = waveCanvas.getContext("2d");
-const fctx = freqCanvas.getContext("2d");
-
-
-// ------------------ AUDIO WORKLET PROCESSOR --------------------
-const inverterWorkletCode = `
-class InverterProcessor extends AudioWorkletProcessor {
-  static get parameterDescriptors() {
-    return [
-      { name: "mix", defaultValue:0, minValue:0, maxValue:1 },
-      { name: "gain", defaultValue:1, minValue:0, maxValue:2 }
-    ];
-  }
-  process(inputs, outputs, parameters) {
-    const input = inputs[0];
-    const output = outputs[0];
-    if (!input.length) return true;
-
-    const mixArr = parameters.mix;
-    const gainArr = parameters.gain;
-
-    for (let ch=0; ch<output.length; ch++) {
-      const inChan = input[ch] ?? input[0];
-      const outChan = output[ch];
-      for (let i=0; i<outChan.length; i++) {
-        const mix = mixArr.length>1? mixArr[i] : mixArr[0];
-        const gain = gainArr.length>1? gainArr[i] : gainArr[0];
-        const inverted = -inChan[i] * gain;
-        outChan[i] = inverted*(1-mix) + inChan[i]*mix;
-      }
-    }
-    return true;
-  }
-}
-registerProcessor("inverter-processor", InverterProcessor);
-`;
-
-
-// ------------------ START FUNCTION -------------------
-async function start() {
-  if (running) return;
-
-  // Mic access
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio:{
-      echoCancellation:false,
-      noiseSuppression:false,
-      autoGainControl:false
-    }
-  });
-
-  // Setup context
-  audioContext = new AudioContext({latencyHint:"interactive"});
-  sourceNode = audioContext.createMediaStreamSource(micStream);
-
-  // Gain
-  gainNode = audioContext.createGain();
-  gainNode.gain.value = parseFloat(gainSlider.value);
-
-  // Register worklet
-  const blob = new Blob([inverterWorkletCode], {type:"application/javascript"});
-  const url = URL.createObjectURL(blob);
-  await audioContext.audioWorklet.addModule(url);
-
-  // Create inverter node
-  inverterNode = new AudioWorkletNode(audioContext, "inverter-processor");
-  inverterNode.parameters.get("mix").value = parseFloat(mixSlider.value);
-  inverterNode.parameters.get("gain").value = parseFloat(gainSlider.value);
-
-  sourceNode.connect(inverterNode);
-  inverterNode.connect(gainNode);
-  gainNode.connect(audioContext.destination);
-
-  URL.revokeObjectURL(url);
-
-  // Visualizers
-  analyser = audioContext.createAnalyser();
-  freqAnalyser = audioContext.createAnalyser();
-
-  analyser.fftSize = 2048;
-  freqAnalyser.fftSize = 2048;
-
-  sourceNode.connect(analyser);
-  sourceNode.connect(freqAnalyser);
-
-  drawWaveform();
-  drawSpectrum();
+(async()=>{
 
   // UI
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  running = true;
-}
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn  = document.getElementById('stopBtn');
+  const calBtn   = document.getElementById('calBtn');
+  const gainEl   = document.getElementById('gain');
+  const mixEl    = document.getElementById('mix');
+  const statusEl = document.getElementById('status');
+  const workletEl= document.getElementById('worklet');
+  const peaksEl  = document.getElementById('peaks');
+  const notchCountEl = document.getElementById('notchCount');
 
+  // Canvas
+  const waveCanvas = document.getElementById('wave');
+  const specCanvas = document.getElementById('spectrum');
+  const wctx = waveCanvas.getContext('2d');
+  const sctx = specCanvas.getContext('2d');
 
-// ------------------ STOP FUNCTION -------------------
-function stop() {
-  if (!running) return;
+  // Audio nodes
+  let audioCtx = null, micStream = null, src = null;
+  let inverterNode = null, gainNode = null;
+  let analyser = null, freqAnalyser = null;
+  let notches = [];
 
-  micStream.getTracks().forEach(t=>t.stop());
-  audioContext.close();
+  // Worklet detection
+  const hasWorklet = !!window.AudioWorkletNode;
+  workletEl.textContent = hasWorklet ? 'yes' : 'no (limited)';
 
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  running = false;
-}
+  // Worklet code string (inverter)
+  const workletCode = `
+  class InverterProcessor extends AudioWorkletProcessor {
+    static get parameterDescriptors(){ return [
+      {name:'mix', defaultValue:0, minValue:0, maxValue:1},
+      {name:'gain', defaultValue:1, minValue:0, maxValue:2}
+    ]; }
+    process(inputs, outputs, parameters){
+      const inp = inputs[0];
+      const out = outputs[0];
+      if(!inp || !inp[0]) return true;
+      const mixA = parameters.mix; const gA = parameters.gain;
+      for(let ch=0; ch<out.length; ch++){
+        const iC = inp[ch] || inp[0]; const oC = out[ch];
+        for(let i=0;i<oC.length;i++){
+          const mix = mixA.length>1?mixA[i]:mixA[0];
+          const gain = gA.length>1?gA[i]:gA[0];
+          const anti = -iC[i]*gain;
+          oC[i] = anti*(1-mix) + iC[i]*mix;
+        }
+      }
+      return true;
+    }
+  }
+  registerProcessor('inv-processor', InverterProcessor);
+  `;
 
+  // helper to resize canvases for high DPI
+  function resizeCanvas(c){
+    const r = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.round(r.width * dpr);
+    c.height = Math.round(r.height * dpr);
+    return {w:c.width, h:c.height, dpr};
+  }
 
-// ------------------ UI EVENTS -------------------
-mixSlider.oninput = () => {
-  if (inverterNode)
-    inverterNode.parameters.get("mix").value = parseFloat(mixSlider.value);
-};
-gainSlider.oninput = () => {
-  if (gainNode)
-    gainNode.gain.value = parseFloat(gainSlider.value);
-};
+  // Visualizers
+  function drawVisualizers(){
+    if(!audioCtx) return;
+    requestAnimationFrame(drawVisualizers);
 
+    // waveform
+    const buf = new Uint8Array(analyser.fftSize);
+    analyser.getByteTimeDomainData(buf);
+    const {w:hW, h:hH} = resizeCanvas(waveCanvas);
+    wctx.clearRect(0,0,hW,hH);
+    wctx.lineWidth = 2 * (window.devicePixelRatio||1);
+    wctx.strokeStyle = '#4ee7c6';
+    wctx.beginPath();
+    for(let i=0;i<buf.length;i++){
+      const x = (i / buf.length) * hW;
+      const y = (buf[i]/255) * hH;
+      if(i===0) wctx.moveTo(x,y); else wctx.lineTo(x,y);
+    }
+    wctx.stroke();
 
-// ------------------ VISUALIZER FUNCTIONS -------------------
-function drawWaveform() {
-  if (!running) return;
+    // spectrum
+    const fbuf = new Uint8Array(freqAnalyser.frequencyBinCount);
+    freqAnalyser.getByteFrequencyData(fbuf);
+    const {w:hW2, h:hH2} = resizeCanvas(specCanvas);
+    sctx.clearRect(0,0,hW2,hH2);
+    const barW = hW2 / fbuf.length;
+    for(let i=0;i<fbuf.length;i++){
+      const v = fbuf[i]/255;
+      const barH = v * hH2;
+      sctx.fillStyle = `hsl(${Math.round((i/fbuf.length)*280)},80%,60%)`;
+      sctx.fillRect(i*barW, hH2-barH, barW*0.9, barH);
+    }
+  }
 
-  requestAnimationFrame(drawWaveform);
+  // Start audio pipeline
+  async function start(){
+    if(audioCtx) return;
+    statusEl.textContent = 'starting…';
+    try{
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio:{ channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false }
+      });
+    }catch(e){
+      statusEl.textContent = 'microphone access denied';
+      console.error(e); return;
+    }
 
-  const buffer = new Uint8Array(analyser.fftSize);
-  analyser.getByteTimeDomainData(buffer);
+    audioCtx = new AudioContext({latencyHint:'interactive'});
+    src = audioCtx.createMediaStreamSource(micStream);
 
-  wctx.fillStyle = "#000";
-  wctx.fillRect(0,0,waveCanvas.width,waveCanvas.height);
+    // create filter chain: src -> notches... -> analyser -> inverter -> gain -> dest
+    analyser = audioCtx.createAnalyser();
+    freqAnalyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    freqAnalyser.fftSize = 4096;
 
-  wctx.strokeStyle="#00ffea";
-  wctx.lineWidth=2;
-  wctx.beginPath();
+    // attach before inverter to visualize raw input
+    src.connect(analyser);
+    src.connect(freqAnalyser);
 
-  let slice = waveCanvas.width / buffer.length;
-  buffer.forEach((v,i)=>{
-    let y = (v/255)*waveCanvas.height;
-    if (i===0) wctx.moveTo(0,y);
-    else wctx.lineTo(i*slice,y);
-  });
+    // register and create inverter
+    if(hasWorklet){
+      const blob = new Blob([workletCode], {type:'application/javascript'});
+      const url = URL.createObjectURL(blob);
+      try{
+        await audioCtx.audioWorklet.addModule(url);
+      }catch(err){
+        console.warn('worklet addModule failed', err);
+      } finally { URL.revokeObjectURL(url); }
+      inverterNode = new AudioWorkletNode(audioCtx,'inv-processor',{
+        parameterData:{ mix:parseFloat(mixEl.value), gain:parseFloat(gainEl.value) }
+      });
+    }else{
+      // fallback: simple ScriptProcessor (higher latency)
+      inverterNode = audioCtx.createScriptProcessor(1024,1,1);
+      inverterNode.onaudioprocess = (e)=>{
+        const inb = e.inputBuffer.getChannelData(0);
+        const outb = e.outputBuffer.getChannelData(0);
+        const g = parseFloat(gainEl.value), m = parseFloat(mixEl.value);
+        for(let i=0;i<inb.length;i++){ const anti = -inb[i]*g; outb[i] = anti*(1-m) + inb[i]*m; }
+      };
+    }
 
-  wctx.stroke();
-}
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = parseFloat(gainEl.value);
 
-function drawSpectrum() {
-  if (!running) return;
+    // connect pipeline: src -> (notches) -> inverter -> gain -> dest
+    // initially no notches: connect src -> inverter
+    src.connect(inverterNode);
+    inverterNode.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
 
-  requestAnimationFrame(drawSpectrum);
+    // keep UI params synced
+    mixEl.oninput = ()=> {
+      if(inverterNode.parameters) inverterNode.parameters.get('mix').setValueAtTime(parseFloat(mixEl.value), audioCtx.currentTime);
+    };
+    gainEl.oninput = ()=> {
+      if(inverterNode.parameters) inverterNode.parameters.get('gain').setValueAtTime(parseFloat(gainEl.value), audioCtx.currentTime);
+      if(gainNode) gainNode.gain.value = parseFloat(gainEl.value);
+    };
 
-  const buffer = new Uint8Array(freqAnalyser.frequencyBinCount);
-  freqAnalyser.getByteFrequencyData(buffer);
+    // start visuals
+    drawVisualizers();
 
-  fctx.fillStyle="#000";
-  fctx.fillRect(0,0,freqCanvas.width,freqCanvas.height);
+    startBtn.disabled = true; stopBtn.disabled = false;
+    statusEl.textContent = 'running';
+  }
 
-  let barWidth = freqCanvas.width / buffer.length;
-  buffer.forEach((v,i)=>{
-    let h = (v/255)*freqCanvas.height;
-    fctx.fillStyle = "#4aff4a";
-    fctx.fillRect(i*barWidth, freqCanvas.height-h, barWidth, h);
-  });
-}
+  // Stop & cleanup
+  function stop(){
+    if(!audioCtx) return;
+    try{
+      micStream.getTracks().forEach(t=>t.stop());
+      audioCtx.close();
+    }catch(e){ console.warn(e); }
+    audioCtx = null; src=null; inverterNode=null; gainNode=null; analyser=null; freqAnalyser=null;
+    notches.forEach(n=>n.disconnect()); notches=[];
+    notchCountEl.textContent = '0';
+    startBtn.disabled = false; stopBtn.disabled = true;
+    statusEl.textContent = 'stopped';
+  }
 
+  // Calibrate: capture spectrum for N seconds, find peaks, create notch filters
+  async function calibrate(duration = 3){
+    if(!audioCtx || !freqAnalyser) { statusEl.textContent = 'start first then calibrate'; return; }
+    statusEl.textContent = 'calibrating…';
+    const frames = Math.round((duration * 1000) / 100); // sample each 100ms
+    const accum = new Float32Array(freqAnalyser.frequencyBinCount).fill(0);
+    for(let i=0;i<frames;i++){
+      await new Promise(r=>setTimeout(r, 100));
+      const buf = new Uint8Array(freqAnalyser.frequencyBinCount);
+      freqAnalyser.getByteFrequencyData(buf);
+      for(let j=0;j<buf.length;j++) accum[j] += buf[j];
+    }
+    // average
+    for(let j=0;j<accum.length;j++) accum[j] /= frames;
+    // find top peaks
+    const peaks = findPeaks(accum, 4, 0.2); // up to 4 peaks, threshold 20% of max
+    peaksEl.textContent = peaks.length ? peaks.map(p=>Math.round(p.freq)+'Hz').join(', ') : 'none';
+    // create notch filters
+    createNotches(peaks.map(p=>p.freq));
+    statusEl.textContent = 'calibration done';
+  }
 
-// ------------------ BUTTON EVENTS -------------------
-startBtn.onclick = start;
-stopBtn.onclick = stop;
+  // findPeaks: returns array of {bin, mag, freq}
+  function findPeaks(magArray, maxPeaks=4, relThreshold=0.15){
+    const maxVal = Math.max(...magArray);
+    const threshold = maxVal * relThreshold;
+    const peaks = [];
+    for(let i=2;i<magArray.length-2;i++){
+      if(magArray[i] > magArray[i-1] && magArray[i] > magArray[i+1] && magArray[i] >= threshold){
+        peaks.push({bin:i, mag:magArray[i]});
+      }
+    }
+    peaks.sort((a,b)=>b.mag-a.mag);
+    const selected = peaks.slice(0,maxPeaks);
+    // convert bin->frequency
+    const sampleRate = audioCtx.sampleRate;
+    const nbins = magArray.length;
+    return selected.map(s=>({bin:s.bin, mag:s.mag, freq: (s.bin * sampleRate) / (nbins*2)}));
+  }
+
+  // create notch filters at frequencies; replace existing notches
+  function createNotches(freqs){
+    // disconnect existing pipeline then insert notches: src -> notch1 -> notch2 -> ... -> inverter
+    // safe guard: if audioCtx not present
+    if(!audioCtx || !src || !inverterNode) return;
+    // disconnect src from inverter
+    try{ src.disconnect(inverterNode); }catch(e){}
+    // remove old notches
+    notches.forEach(n=>{ try{ n.disconnect(); }catch(e){} });
+    notches = [];
+
+    // build chain
+    let prev = src;
+    freqs.forEach((f, idx)=>{
+      const bq = audioCtx.createBiquadFilter();
+      bq.type = 'notch';
+      bq.frequency.value = f;
+      // Q controls width; higher Q = narrower notch. tune to 30-80 for mains/fan
+      bq.Q.value = 30;
+      // depth: gain isn't used for notch; control via Q and follow-up gain if needed
+      prev.connect(bq);
+      notches.push(bq);
+      prev = bq;
+    });
+
+    // connect last node to inverter
+    prev.connect(inverterNode);
+    // also keep the original src->analyser connections (visualization)
+    // update count
+    notchCountEl.textContent = notches.length;
+  }
+
+  // UI wiring
+  startBtn.onclick = start;
+  stopBtn.onclick = stop;
+  calBtn.onclick = ()=> {
+    calBtn.disabled = true;
+    calibrate(3).finally(()=> calBtn.disabled = false);
+  };
+
+  // ensure canvases sized initially
+  function initialResize(){ resizeCanvas(waveCanvas); resizeCanvas(specCanvas); }
+  function resizeCanvas(c){ const r=c.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; c.width = Math.round(r.width*dpr); c.height = Math.round(r.height*dpr); }
+  window.addEventListener('resize', initialResize); initialResize();
+
+  // done
+  statusEl.textContent = 'ready';
+})();
 </script>
-
 </body>
- </html>
+                                                                                                                         </html>
