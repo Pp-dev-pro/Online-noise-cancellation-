@@ -1,208 +1,263 @@
- 
-  let audioContext = null;
-  let micStream = null;
-  let sourceNode = null;
-  let inverterNode = null;
-  let gainNode = null;
-  let running = false;
-  let useWorklet = !!(window.AudioWorkletNode && AudioWorkletProcessor);
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Anti-Noise Demo (ANC Web)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-  workletSupportEl.textContent = useWorklet ? "yes" : "no (will try ScriptProcessor fallback)";
-
-  // AudioWorklet processor code as a string (we'll make a blob)
-  const inverterWorkletCode = `
-    class InverterProcessor extends AudioWorkletProcessor {
-      static get parameterDescriptors() {
-        return [
-          { name: 'mix', defaultValue: 0.0, minValue:0, maxValue:1 }, // 0=pure anti-noise, 1=passthrough
-          { name: 'gain', defaultValue: 1.0, minValue:0, maxValue:2 }
-        ];
-      }
-      constructor(options) {
-        super();
-      }
-      process (inputs, outputs, parameters) {
-        const input = inputs[0];
-        const output = outputs[0];
-        if (!input || input.length === 0) {
-          // silence if no input
-          return true;
-        }
-        const mixArr = parameters.mix;
-        const gainArr = parameters.gain;
-
-        for (let channel = 0; channel < output.length; ++channel) {
-          const inchan = input[channel] || input[0]; // fallback if mono
-          const outchan = output[channel];
-          if (!inchan) continue;
-
-          for (let i = 0; i < outchan.length; ++i) {
-            // parameter arrays are either length 1 (k-rate) or 128 (a-rate)
-            const mix = mixArr.length > 1 ? mixArr[i] : mixArr[0];
-            const gain = gainArr.length > 1 ? gainArr[i] : gainArr[0];
-
-            // anti-noise: invert the input sample, scale by gain
-            const anti = -inchan[i] * gain;
-
-            // mix between anti-noise and passthrough input:
-            outchan[i] = anti * (1 - mix) + inchan[i] * mix;
-          }
-        }
-        return true;
-      }
-    }
-    registerProcessor('inverter-processor', InverterProcessor);
-  `;
-
-  // Fallback ScriptProcessor implementation (higher latency)
-  function createScriptProcessorInverter(context, bufferSize = 1024) {
-    const sp = context.createScriptProcessor(bufferSize, 1, 1);
-    sp.onaudioprocess = (evt) => {
-      const inbuf = evt.inputBuffer;
-      const outbuf = evt.outputBuffer;
-      const inData = inbuf.getChannelData(0);
-      const outData = outbuf.getChannelData(0);
-      const gain = parseFloat(gainSlider.value);
-      const mix = parseFloat(mixSlider.value);
-      for (let i = 0; i < inData.length; ++i) {
-        const anti = -inData[i] * gain;
-        outData[i] = anti * (1 - mix) + inData[i] * mix;
-      }
-    };
-    return sp;
+<style>
+  body {
+    margin:0;
+    padding:20px;
+    font-family: system-ui;
+    background:#0d0d0d;
+    color:white;
   }
+  h1 { font-size:1.8rem; margin-bottom:10px; }
+  p { opacity:0.8; }
 
-  async function start() {
-    if (running) return;
-    log("Starting...");
-    try {
-      // Request microphone with raw audio (disable browser processing)
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 44100,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        }
-      });
-    } catch (err) {
-      log("getUserMedia error:", err.message || err);
-      return;
+  .controls {
+    display:flex;
+    gap:10px;
+    flex-wrap:wrap;
+    margin:20px 0;
+  }
+  button {
+    background:#1f1f1f;
+    border:1px solid #444;
+    padding:10px 18px;
+    border-radius:8px;
+    font-size:1rem;
+    cursor:pointer;
+    color:white;
+  }
+  button.primary { background:#008cff; border-color:#008cff; }
+  button:disabled { opacity:0.4; }
+
+  .panel {
+    background:#151515;
+    padding:15px;
+    border-radius:10px;
+    margin-top:20px;
+  }
+  canvas { width:100%; height:120px; background:#000; border-radius:6px; }
+</style>
+</head>
+<body>
+
+<h1>Web Anti-Noise (ANC)</h1>
+<p>Noise cancellation + waveform + spectrum visualizer. Use headphones.</p>
+
+<!-- Controls -->
+<div class="controls">
+  <button id="startBtn" class="primary">Start</button>
+  <button id="stopBtn" disabled>Stop</button>
+
+  <label>
+    Gain:
+    <input id="gainSlider" type="range" min="0" max="2" step="0.01" value="1">
+  </label>
+
+  <label>
+    Mix:
+    <input id="mixSlider" type="range" min="0" max="1" step="0.01" value="0">
+  </label>
+</div>
+
+<!-- Waveform Visualizer -->
+<div class="panel">
+  <h3>Waveform</h3>
+  <canvas id="waveCanvas"></canvas>
+</div>
+
+<!-- Spectrum Visualizer -->
+<div class="panel">
+  <h3>Spectrum</h3>
+  <canvas id="freqCanvas"></canvas>
+</div>
+
+<script>
+let audioContext, micStream, sourceNode;
+let inverterNode, gainNode;
+let analyser, freqAnalyser;
+let running=false;
+
+const startBtn=document.getElementById("startBtn");
+const stopBtn=document.getElementById("stopBtn");
+const gainSlider=document.getElementById("gainSlider");
+const mixSlider=document.getElementById("mixSlider");
+
+const waveCanvas=document.getElementById("waveCanvas");
+const freqCanvas=document.getElementById("freqCanvas");
+const wctx = waveCanvas.getContext("2d");
+const fctx = freqCanvas.getContext("2d");
+
+
+// ------------------ AUDIO WORKLET PROCESSOR --------------------
+const inverterWorkletCode = `
+class InverterProcessor extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name: "mix", defaultValue:0, minValue:0, maxValue:1 },
+      { name: "gain", defaultValue:1, minValue:0, maxValue:2 }
+    ];
+  }
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    const output = outputs[0];
+    if (!input.length) return true;
+
+    const mixArr = parameters.mix;
+    const gainArr = parameters.gain;
+
+    for (let ch=0; ch<output.length; ch++) {
+      const inChan = input[ch] ?? input[0];
+      const outChan = output[ch];
+      for (let i=0; i<outChan.length; i++) {
+        const mix = mixArr.length>1? mixArr[i] : mixArr[0];
+        const gain = gainArr.length>1? gainArr[i] : gainArr[0];
+        const inverted = -inChan[i] * gain;
+        outChan[i] = inverted*(1-mix) + inChan[i]*mix;
+      }
     }
+    return true;
+  }
+}
+registerProcessor("inverter-processor", InverterProcessor);
+`;
 
-    // Create/resume AudioContext
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
-    await audioContext.audioWorklet?.readyCatch?.(); // no-op but nice for some browsers
-    sourceNode = audioContext.createMediaStreamSource(micStream);
 
-    // Create gain node (master output)
-    gainNode = audioContext.createGain();
+// ------------------ START FUNCTION -------------------
+async function start() {
+  if (running) return;
+
+  // Mic access
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio:{
+      echoCancellation:false,
+      noiseSuppression:false,
+      autoGainControl:false
+    }
+  });
+
+  // Setup context
+  audioContext = new AudioContext({latencyHint:"interactive"});
+  sourceNode = audioContext.createMediaStreamSource(micStream);
+
+  // Gain
+  gainNode = audioContext.createGain();
+  gainNode.gain.value = parseFloat(gainSlider.value);
+
+  // Register worklet
+  const blob = new Blob([inverterWorkletCode], {type:"application/javascript"});
+  const url = URL.createObjectURL(blob);
+  await audioContext.audioWorklet.addModule(url);
+
+  // Create inverter node
+  inverterNode = new AudioWorkletNode(audioContext, "inverter-processor");
+  inverterNode.parameters.get("mix").value = parseFloat(mixSlider.value);
+  inverterNode.parameters.get("gain").value = parseFloat(gainSlider.value);
+
+  sourceNode.connect(inverterNode);
+  inverterNode.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+
+  URL.revokeObjectURL(url);
+
+  // Visualizers
+  analyser = audioContext.createAnalyser();
+  freqAnalyser = audioContext.createAnalyser();
+
+  analyser.fftSize = 2048;
+  freqAnalyser.fftSize = 2048;
+
+  sourceNode.connect(analyser);
+  sourceNode.connect(freqAnalyser);
+
+  drawWaveform();
+  drawSpectrum();
+
+  // UI
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  running = true;
+}
+
+
+// ------------------ STOP FUNCTION -------------------
+function stop() {
+  if (!running) return;
+
+  micStream.getTracks().forEach(t=>t.stop());
+  audioContext.close();
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  running = false;
+}
+
+
+// ------------------ UI EVENTS -------------------
+mixSlider.oninput = () => {
+  if (inverterNode)
+    inverterNode.parameters.get("mix").value = parseFloat(mixSlider.value);
+};
+gainSlider.oninput = () => {
+  if (gainNode)
     gainNode.gain.value = parseFloat(gainSlider.value);
+};
 
-    if (useWorklet) {
-      // Register worklet
-      const blob = new Blob([inverterWorkletCode], { type: 'application/javascript' });
-      const blobUrl = URL.createObjectURL(blob);
-      try {
-        await audioContext.audioWorklet.addModule(blobUrl);
-        inverterNode = new AudioWorkletNode(audioContext, 'inverter-processor', {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          channelCount: 1,
-          parameterData: { mix: parseFloat(mixSlider.value), gain: parseFloat(gainSlider.value) }
-        });
 
-        // Keep parameters in sync with sliders
-        mixSlider.addEventListener('input', () => {
-          inverterNode.parameters.get('mix').setValueAtTime(parseFloat(mixSlider.value), audioContext.currentTime);
-        });
-        gainSlider.addEventListener('input', () => {
-          inverterNode.parameters.get('gain').setValueAtTime(parseFloat(gainSlider.value), audioContext.currentTime);
-          gainNode.gain.setValueAtTime(parseFloat(gainSlider.value), audioContext.currentTime);
-        });
+// ------------------ VISUALIZER FUNCTIONS -------------------
+function drawWaveform() {
+  if (!running) return;
 
-        sourceNode.connect(inverterNode);
-        inverterNode.connect(gainNode);
-        gainNode.connect(audioContext.destination);
+  requestAnimationFrame(drawWaveform);
 
-        log("AudioWorklet inverter node running.");
-      } catch (err) {
-        log("AudioWorklet failed — falling back to ScriptProcessor:", err.message || err);
-        inverterNode = createScriptProcessorInverter(audioContext, 1024);
-        sourceNode.connect(inverterNode);
-        inverterNode.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-      } finally {
-        URL.revokeObjectURL(blobUrl);
-      }
-    } else {
-      inverterNode = createScriptProcessorInverter(audioContext, 1024);
-      sourceNode.connect(inverterNode);
-      inverterNode.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      log("ScriptProcessor inverter running (high latency).");
-    }
+  const buffer = new Uint8Array(analyser.fftSize);
+  analyser.getByteTimeDomainData(buffer);
 
-    // Update UI
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
-    running = true;
+  wctx.fillStyle = "#000";
+  wctx.fillRect(0,0,waveCanvas.width,waveCanvas.height);
 
-    // Show estimated output latency from context (if available)
-    const estLatency = (audioContext.baseLatency || 0) * 1000;
-    latencyEl.textContent = estLatency ? estLatency.toFixed(1) + ' ms' : 'unknown';
+  wctx.strokeStyle="#00ffea";
+  wctx.lineWidth=2;
+  wctx.beginPath();
 
-    log("Started. Use headphones and keep volume low initially.");
-  }
-
-  function stop() {
-    if (!running) return;
-    log("Stopping...");
-    try {
-      if (sourceNode) sourceNode.disconnect();
-      if (inverterNode) inverterNode.disconnect?.();
-      if (gainNode) gainNode.disconnect?.();
-      if (micStream) {
-        micStream.getTracks().forEach(t => t.stop());
-        micStream = null;
-      }
-      if (audioContext) {
-        audioContext.close();
-        audioContext = null;
-      }
-    } catch (err) {
-      log("Error during stop:", err);
-    }
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
-    running = false;
-    log("Stopped.");
-  }
-
-  // Wire UI
-  startBtn.addEventListener('click', async () => {
-    await start();
-  });
-  stopBtn.addEventListener('click', stop);
-
-  // Clean up when page hidden
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      // optional: pause/stop
-    }
+  let slice = waveCanvas.width / buffer.length;
+  buffer.forEach((v,i)=>{
+    let y = (v/255)*waveCanvas.height;
+    if (i===0) wctx.moveTo(0,y);
+    else wctx.lineTo(i*slice,y);
   });
 
-  // Some browsers require user gesture to resume audio context
-  window.addEventListener('click', () => {
-    if (audioContext && audioContext.state === 'suspended') audioContext.resume();
+  wctx.stroke();
+}
+
+function drawSpectrum() {
+  if (!running) return;
+
+  requestAnimationFrame(drawSpectrum);
+
+  const buffer = new Uint8Array(freqAnalyser.frequencyBinCount);
+  freqAnalyser.getByteFrequencyData(buffer);
+
+  fctx.fillStyle="#000";
+  fctx.fillRect(0,0,freqCanvas.width,freqCanvas.height);
+
+  let barWidth = freqCanvas.width / buffer.length;
+  buffer.forEach((v,i)=>{
+    let h = (v/255)*freqCanvas.height;
+    fctx.fillStyle = "#4aff4a";
+    fctx.fillRect(i*barWidth, freqCanvas.height-h, barWidth, h);
   });
+}
 
-  // expose for debugging
-  window._antiNoise = { start, stop };
 
-  log("Ready. Click Start to begin.");
-})();
+// ------------------ BUTTON EVENTS -------------------
+startBtn.onclick = start;
+stopBtn.onclick = stop;
 </script>
+
 </body>
-</html>
+ </html>
